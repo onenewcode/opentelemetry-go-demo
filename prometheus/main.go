@@ -1,6 +1,3 @@
-// Copyright The OpenTelemetry Authors
-// SPDX-License-Identifier: Apache-2.0
-
 package main
 
 import (
@@ -21,7 +18,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric"
 )
 
-const meterName = "github.com/open-telemetry/opentelemetry-go/example/prometheus"
+const meterName = "example/prometheus"
 
 func main() {
 	//用当前时间戳初始化一个随机数
@@ -29,12 +26,7 @@ func main() {
 	ctx := context.Background()
 	//	导出器嵌入默认的 OpenTelemetry Reader，并且 实现 Prometheus。收集器，允许将其用作
 	//	既是读者又是收集者。
-	// The exporter embeds a default OpenTelemetry Reader and
-	// implements prometheus.Collector, allowing it to be used as
-	// both a Reader and Collector.
-
-	// exporter 出口商
-	exporter, err := prometheus.New()
+	exporter, err := prometheus.New() // 生成http客户端
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -90,21 +82,9 @@ func main() {
 }
 
 func serveMetrics() {
-	log.Printf("serving metrics at localhost:2223/metrics")
+	log.Printf("serving metrics at localhost:8080/metrics")
 	http.Handle("/metrics", promhttp.Handler())
-	// 发送信息的端口。然后我们需要更改 配置文件
-	// global:
-	//  scrape_interval: 15s
-	//
-	//scrape_configs:
-	//  - job_name: prometheus
-	//    static_configs:
-	//      - targets: ["localhost:9090"]
-	//  - job_name: simple_server
-	//    static_configs:
-	//      - targets: ["localhost:2223"]
-	//prometheus --config.file=prometheus.yml
-	err := http.ListenAndServe(":2223", nil) //nolint:gosec // Ignoring G114: Use of net/http serve function that has no support for setting timeouts.
+	err := http.ListenAndServe(":8080", nil) //nolint:gosec // Ignoring G114: Use of net/http serve function that has no support for setting timeouts.
 	if err != nil {
 		fmt.Printf("error serving http: %v", err)
 		return
