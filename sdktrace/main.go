@@ -1,119 +1,99 @@
-// Copyright The OpenTelemetry Authors
-// SPDX-License-Identifier: Apache-2.0
 package main
 
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/signal"
-	"strings"
-	"sync"
-	"syscall"
-	"time"
-
-	"github.com/sirupsen/logrus"
+	"github.com/go-logr/stdr"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	"go.opentelemetry.io/otel/propagation"
-	sdkresource "go.opentelemetry.io/otel/sdk/resource"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
+	"log"
 )
 
-var log *logrus.Logger
-var resource *sdkresource.Resource
-var initResourcesOnce sync.Once
+var (
+	fooKey     = attribute.Key("ex.com/foo")
+	barKey     = attribute.Key("ex.com/bar")
+	anotherKey = attribute.Key("ex.com/another")
+)
 
-// 初始化日志
-func init() {
-	log = logrus.New()
-	log.Level = logrus.DebugLevel
-	log.Formatter = &logrus.JSONFormatter{
-		FieldMap: logrus.FieldMap{
-			logrus.FieldKeyTime:  "timestamp",
-			logrus.FieldKeyLevel: "severity",
-			logrus.FieldKeyMsg:   "message",
-		},
-		TimestampFormat: time.RFC3339Nano,
-	}
-	log.Out = os.Stdout
+var lemonsKey = attribute.Key("ex.com/lemons")
+
+// SubOperation是演示命名跟踪程序使用的示例。
+// 它创建一个带有包路径的命名跟踪程序。
+func SubOperation(ctx context.Context) error {
+	// 创建一个追踪器
+	tr := otel.Tracer("go.opentelemetry.io/otel/example/namedtracer/foo")
+	// 创建一个span
+	var span trace.Span
+	_, span = tr.Start(ctx, "Sub operation...")
+	defer span.End()
+	span.SetAttributes(lemonsKey.String("five"))
+	span.AddEvent("Sub span event")
+	return nil
 }
 
-// 初始化数据源
-func initResource() *sdkresource.Resource {
-	initResourcesOnce.Do(func() { // 保证只初始化一次
-		extraResources, _ := sdkresource.New(
-			context.Background(),
-			sdkresource.WithOS(),
-			sdkresource.WithProcess(),
-			sdkresource.WithContainer(),
-			sdkresource.WithHost(),
-		)
-		resource, _ = sdkresource.Merge(
-			sdkresource.Default(),
-			extraResources,
-		)
-	})
-	return resource
-}
+// 追踪器全局变量，以供其他模块使用
+var tp *sdktrace.TracerProvider
 
-// 初始化追踪器
-func initTracerProvider() (*sdktrace.TracerProvider, error) {
-	ctx := context.Background()
-	// todo 设置导出器
-	exporter, err := otlptracegrpc.New(ctx)
+// initTracer创建并注册跟踪提供程序实例。
+func initTracer() error {
+
+	exp, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("failed to initialize stdouttrace exporter: %w", err)
 	}
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
-		sdktrace.WithResource(initResource()),
+	// 这里设置标准exporter，除此之外还有ja和otel
+	//NewBatchSpanProcessor创建一个新的SpanProcessor，它将使用提供的选项将完成的span批发送给导出器。
+	bsp := sdktrace.NewBatchSpanProcessor(exp)
+
+	tp = sdktrace.NewTracerProvider(
+		// 设置采样器，这里设置成AlwaysSample，表示所有span都会被采样
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+
+		sdktrace.WithSpanProcessor(bsp),
 	)
 	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
-	return tp, nil
+	return nil
 }
 
 func main() {
-	tp, err := initTracerProvider()
+	//将日志级别设置为info以查看SDK状态消息
+	stdr.SetVerbosity(5)
+
+	if err := initTracer(); err != nil {
+		log.Panic(err)
+	}
+
+	// 创建一个以包路径作为其名称的命名跟踪程序。
+	tracer := tp.Tracer("go.opentelemetry.io/otel/example/namedtracer")
+	ctx := context.Background()
+	defer func() { _ = tp.Shutdown(ctx) }()
+	m0, err := baggage.NewMemberRaw(string(fooKey), "foo1")
 	if err != nil {
-		log.Fatal(err)
+		log.Println("failed to create Member m0")
+		return
 	}
-	defer func() {
-		if err := tp.Shutdown(context.Background()); err != nil {
-			log.Printf("Error shutting down tracer provider: %v", err)
-		}
-		log.Println("Shutdown trace provider")
-	}()
-
-	var brokers string
-	mustMapEnv(&brokers, "KAFKA_SERVICE_ADDR")
-
-	brokerList := strings.Split(brokers, ",")
-	log.Printf("Kafka brokers: %s", strings.Join(brokerList, ", "))
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGKILL)
-	defer cancel()
-	var consumerGroup sarama.ConsumerGroup
-	if consumerGroup, err = kafka.StartConsumerGroup(ctx, brokerList, log); err != nil {
-		log.Fatal(err)
+	m1, err := baggage.NewMemberRaw(string(barKey), "bar1")
+	if err != nil {
+		log.Println("failed to create Member m1")
+		return
 	}
-	defer func() {
-		if err := consumerGroup.Close(); err != nil {
-			log.Printf("Error closing consumer group: %v", err)
-		}
-		log.Println("Closed consumer group")
-	}()
-
-	<-ctx.Done()
-
-	log.Println("Accounting service exited")
-}
-
-func mustMapEnv(target *string, envKey string) {
-	v := os.Getenv(envKey)
-	if v == "" {
-		panic(fmt.Sprintf("environment variable %q not set", envKey))
+	b, err := baggage.New(m0, m1)
+	if err != nil {
+		log.Println("failed to create baggage")
+		return
 	}
-	*target = v
+	ctx = baggage.ContextWithBaggage(ctx, b)
+
+	var span trace.Span
+	ctx, span = tracer.Start(ctx, "operation")
+	defer span.End()
+	span.AddEvent("Nice operation!", trace.WithAttributes(attribute.Int("bogons", 100)))
+	span.SetAttributes(anotherKey.String("yes"))
+	if err := SubOperation(ctx); err != nil {
+		panic(err)
+	}
 }
