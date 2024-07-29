@@ -3,22 +3,23 @@ package main
 import (
 	"context"
 	"fmt"
+	p2 "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/prometheus"
+	api "go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/sdk/metric"
 	"log"
 	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/prometheus"
-	api "go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/sdk/metric"
 )
 
 const meterName = "example/prometheus"
+
+var r = p2.NewRegistry() // 设置全局注册表，用于初始化prometheus
 
 func main() {
 	//用当前时间戳初始化一个随机数
@@ -26,7 +27,11 @@ func main() {
 	ctx := context.Background()
 	//	导出器嵌入默认的 OpenTelemetry Reader，并且 实现 Prometheus。收集器，允许将其用作
 	//	既是读者又是收集者。
-	exporter, err := prometheus.New() // 生成http客户端
+	//exporter, err := prometheus.New() // 生成http客户端
+
+	// 生成自定义注册表
+	exporter, err := prometheus.New(prometheus.WithRegisterer(r))
+
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -35,7 +40,6 @@ func main() {
 	// Meter是创建和记录度量指标的主要接口
 	meter := provider.Meter(meterName)
 	//启动 prometheus HTTP 服务器并将导出器 Collector 传递给它
-	// Start the prometheus HTTP server and pass the exporter Collector to it
 	go serveMetrics()
 	// 定义了一组属性（Attributes）用于附加到度量指标上，增加度量数据的上下文信息。
 	opt := api.WithAttributes(
@@ -43,7 +47,6 @@ func main() {
 		attribute.Key("C").String("D"),
 	)
 	//  创建计数器,第一个参数设置名称，用于搜索，第二个参数，
-	// This is the equivalent of prometheus.NewCounterVec
 	counter, err := meter.Float64Counter("foo", api.WithDescription("a simple counter"))
 	if err != nil {
 		log.Fatal(err)
@@ -83,8 +86,12 @@ func main() {
 
 func serveMetrics() {
 	log.Printf("serving metrics at localhost:8080/metrics")
-	http.Handle("/metrics", promhttp.Handler())
-	err := http.ListenAndServe(":8080", nil) //nolint:gosec // Ignoring G114: Use of net/http serve function that has no support for setting timeouts.
+	// 默认handler，提供go属性和prometheus属性监控
+	//http.Handle("/metrics", promhttp.Handler())
+
+	// 生成自定义注册表
+	http.Handle("/metrics", promhttp.HandlerFor(r, promhttp.HandlerOpts{Registry: r}))
+	err := http.ListenAndServe(":8080", nil)
 	if err != nil {
 		fmt.Printf("error serving http: %v", err)
 		return
